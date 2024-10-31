@@ -1,66 +1,82 @@
-import disnake
-from disnake.ext import commands
-import sqlite3
+import discord
+from discord.ext import commands
+from discord.ext.commands import Context
 import json
-from datetime import datetime
+import os
+from typing import Optional
 
-class Feedback(commands.Cog):
+class FeedbackCog(commands.Cog, name="feedback"):
     def __init__(self, bot):
         self.bot = bot
-        # Initialize SQLite database
-        self.conn = sqlite3.connect('feedback.db')
-        self.setup_database()
-
-    def setup_database(self):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS feedback (
-                id INTEGER PRIMARY KEY,
-                user_id TEXT,
-                username TEXT,
-                content TEXT,
-                timestamp TEXT,
-                status TEXT
-            )
-        ''')
-        self.conn.commit()
-
-    def store_feedback(self, user_id, username, content):
-        """Store user feedback in database"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'INSERT INTO feedback (user_id, username, content, timestamp, status) VALUES (?, ?, ?, ?, ?)',
-            (user_id, username, content, datetime.now().isoformat(), 'new')
-        )
-        self.conn.commit()
-
+        
     @commands.slash_command(
         name="submit_feedback",
         description="Submit feedback or suggestion for the server"
     )
     async def submit_feedback(
-        self, 
-        inter: disnake.ApplicationCommandInteraction,
+        self,
+        context: Context,
         feedback: str
-    ):
-        """Handle feedback submission"""
-        self.store_feedback(str(inter.author.id), inter.author.name, feedback)
-        await inter.response.send_message("Thank you for your feedback!", ephemeral=True)
+    ) -> None:
+        """
+        Submit feedback that will be stored for admins to review.
+
+        :param context: The context of the slash command
+        :param feedback: The feedback text to submit
+        """
+      
+        await self.bot.database.execute(
+            """INSERT INTO feedback (user_id, username, content, timestamp, status)
+               VALUES (?, ?, ?, datetime('now'), 'new')""",
+            (str(context.author.id), context.author.name, feedback)
+        )
+        await self.bot.database.commit()
+        
+        embed = discord.Embed(
+            description="Thank you for your feedback!",
+            color=0x9C84EF
+        )
+        await context.send(embed=embed)
 
     @commands.slash_command(
         name="view_feedback",
-        description="View all feedback (Admin only)",
-        default_member_permissions=disnake.Permissions(administrator=True)
+        description="Generate HTML report of all feedback (Admin only)"
     )
-    async def view_feedback(self, inter: disnake.ApplicationCommandInteraction):
-        """Display all feedback entries"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT username, content, timestamp FROM feedback')
-        entries = cursor.fetchall()
+    @commands.has_permissions(administrator=True)
+    async def view_feedback(self, context: Context) -> None:
+        """
+        Generate and send an HTML report of all feedback.
         
-      
-        html_content = "<html><body><h1>Feedback Dashboard</h1><table>"
+        :param context: The context of the slash command
+        """
+        # Fetch all feedback
+        async with self.bot.database.execute(
+            "SELECT username, content, timestamp FROM feedback"
+        ) as cursor:
+            entries = await cursor.fetchall()
+        
+
+        html_content = """
+        <html>
+        <head>
+            <style>
+                table { width: 100%; border-collapse: collapse; }
+                th, td { padding: 8px; text-align: left; border: 1px solid #ddd; }
+                th { background-color: #9C84EF; color: white; }
+            </style>
+        </head>
+        <body>
+            <h1>Feedback Dashboard</h1>
+            <table>
+                <tr>
+                    <th>User</th>
+                    <th>Feedback</th>
+                    <th>Time</th>
+                </tr>
+        """
+        
         for username, content, timestamp in entries:
+           
             html_content += f"""
                 <tr>
                     <td>{username}</td>
@@ -68,17 +84,37 @@ class Feedback(commands.Cog):
                     <td>{timestamp}</td>
                 </tr>
             """
+            
         html_content += "</table></body></html>"
         
-        # Save the HTML report
-        with open('feedback_report.html', 'w') as f:
+        # Save and send report
+        report_path = f"{os.path.realpath(os.path.dirname(__file__))}/feedback_report.html"
+        with open(report_path, "w", encoding="utf-8") as f:
             f.write(html_content)
             
-        await inter.response.send_message(
-            "Feedback report generated!",
-            file=disnake.File('feedback_report.html'),
-            ephemeral=True
+        await context.send(
+            file=discord.File(report_path),
+            embed=discord.Embed(
+                description="Feedback report generated!",
+                color=0x9C84EF
+            )
         )
+        
+        # Cleanup
+        os.remove(report_path)
 
-def setup(bot):
-    bot.add_cog(Feedback(bot))
+async def setup(bot):
+    # Create feedback table if it doesn't exist
+    await bot.database.execute("""
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+    """)
+    await bot.database.commit()
+    
+    await bot.add_cog(FeedbackCog(bot))
